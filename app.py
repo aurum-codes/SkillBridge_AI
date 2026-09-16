@@ -16,9 +16,12 @@ Run:
 """
 
 import random
+import re
+from html import unescape
 from datetime import datetime
 
 import pandas as pd
+import requests
 import streamlit as st
 
 # ---------------------------------------------------------------------------
@@ -31,11 +34,54 @@ st.set_page_config(
     layout="wide",
 )
 
+st.markdown(
+    """
+    <style>
+    :root {
+        --ink: #132238;
+        --muted: #617086;
+        --paper: #f4f7fb;
+        --line: #dce5ef;
+        --blue: #1464a5;
+        --teal: #008c95;
+        --coral: #e56b52;
+    }
+    .stApp { background: var(--paper); }
+    [data-testid="stSidebar"] { background: var(--ink); }
+    [data-testid="stSidebar"] * { color: #eef5fb; }
+    [data-testid="stSidebar"] hr { border-color: #34445a; }
+    [data-testid="stMetric"] {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px 16px;
+        box-shadow: 0 4px 18px rgba(19, 34, 56, 0.05);
+    }
+    [data-testid="stMetricLabel"] { color: var(--muted); }
+    [data-testid="stMetricValue"] { color: var(--ink); }
+    .hero {
+        background: linear-gradient(115deg, #132238 0%, #174d76 62%, #008c95 100%);
+        border-radius: 18px;
+        padding: 28px 32px;
+        color: white;
+        margin-bottom: 22px;
+    }
+    .hero h1 { color: white; margin: 0 0 6px 0; letter-spacing: 0; }
+    .hero p { color: #d9eef5; margin: 0; font-size: 1.05rem; }
+    .eyebrow { color: #8fe1d4; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+    .source-pill { color: var(--teal); font-weight: 700; font-size: 0.85rem; }
+    .stButton > button[kind="primary"] { background: var(--coral); border-color: var(--coral); }
+    .stButton > button[kind="primary"]:hover { background: #c8533e; border-color: #c8533e; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ---------------------------------------------------------------------------
 # MOCK REFERENCE DATA
 # ---------------------------------------------------------------------------
 
-TIER_CITIES = [
+FALLBACK_LOCATIONS = [
     "Warangal, Telangana (Tier-3)",
     "Coimbatore, Tamil Nadu (Tier-2)",
     "Bhubaneswar, Odisha (Tier-2)",
@@ -44,6 +90,9 @@ TIER_CITIES = [
     "Jhansi, Uttar Pradesh (Tier-3)",
     "Other Tier-2/3 City",
 ]
+
+COUNTRIES_API = "https://countriesnow.space/api/v0.1/countries"
+JOBS_API = "https://www.arbeitnow.com/api/job-board-api"
 
 # Universe of skills the Talent Inference Agent can "detect" from a
 # GitHub/portfolio scan. In production this would come from an actual
@@ -90,6 +139,120 @@ OPEN_REQUISITIONS = {
     "SAP Data Analyst": {"req_id": "REQ-4515", "team": "Supply Chain Analytics", "location": "Hybrid — Pune"},
 }
 
+FALLBACK_JOB_POSITIONS = [
+    {
+        "title": role,
+        "company_name": "SkillBridge Enterprise Network",
+        "location": details["location"],
+        "url": "",
+        "description": "",
+        "source": "SkillBridge catalog",
+        "req_id": details["req_id"],
+        "skills": requirements,
+    }
+    for role, requirements in ROLE_REQUIREMENTS.items()
+    for details in [OPEN_REQUISITIONS[role]]
+]
+
+SKILL_ALIASES = {
+    "Python": ["python"],
+    "JavaScript": ["javascript", "typescript"],
+    "SQL": ["sql", "postgresql", "mysql"],
+    "HTML/CSS": ["html", "css"],
+    "Java": ["java", "spring boot"],
+    "React": ["react", "react.js"],
+    "Node.js": ["node.js", "nodejs"],
+    "REST APIs": ["rest api", "restful", "web api"],
+    "Git/GitHub": ["git", "github", "version control"],
+    "Data Analysis": ["data analysis", "analytics", "tableau", "power bi"],
+    "Excel/Reporting": ["excel", "reporting", "dashboard"],
+    "Linux/Unix": ["linux", "unix"],
+    "Statistics": ["statistics", "statistical"],
+    "Machine Learning": ["machine learning", "ml", "artificial intelligence"],
+    "OOP Concepts": ["object-oriented", "oop"],
+    "Debugging": ["debugging", "troubleshooting"],
+    "Cloud Basics (AWS/Azure)": ["aws", "azure", "cloud"],
+    "Problem Solving": ["problem solving", "analytical"],
+    "Self-Learning/MOOCs": ["learning", "certification", "course"],
+    "Database Management": ["database", "data warehouse", "etl"],
+    "JSON/OData": ["json", "odata"],
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_worldwide_locations() -> tuple[list[str], dict[str, list[str]], str]:
+    """Load countries and cities, returning a small fallback when offline."""
+    try:
+        response = requests.get(COUNTRIES_API, timeout=12)
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("error"):
+            raise ValueError(payload.get("msg", "Location API returned an error"))
+        locations = {
+            item["country"]: sorted(item.get("cities", []))
+            for item in payload.get("data", [])
+            if item.get("country")
+        }
+        if not locations:
+            raise ValueError("Location API returned no countries")
+        return sorted(locations), locations, "Live · CountriesNow"
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        countries = sorted({location.rsplit(", ", 1)[-1].split(" (")[0] for location in FALLBACK_LOCATIONS})
+        return countries, {country: [] for country in countries}, "Fallback · local catalog"
+
+
+def clean_job_description(description: str) -> str:
+    return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", description or ""))).strip()
+
+
+def extract_job_skills(text: str) -> list[str]:
+    normalized = text.lower()
+    matches = [skill for skill, aliases in SKILL_ALIASES.items() if any(alias in normalized for alias in aliases)]
+    return matches or ["Problem Solving", "Self-Learning/MOOCs"]
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_live_jobs() -> tuple[list[dict], str]:
+    """Load public job postings and convert them to SkillBridge requisitions."""
+    try:
+        response = requests.get(JOBS_API, timeout=15)
+        response.raise_for_status()
+        records = response.json().get("data", [])
+        jobs = []
+        for record in records:
+            title = (record.get("title") or "").strip()
+            if not title:
+                continue
+            description = clean_job_description(record.get("description", ""))
+            jobs.append({
+                "title": title,
+                "company_name": record.get("company_name") or "Undisclosed company",
+                "location": record.get("location") or ("Remote" if record.get("remote") else "Worldwide"),
+                "url": record.get("url", ""),
+                "description": description,
+                "source": "Live · Arbeitnow",
+                "req_id": record.get("slug", "LIVE")[:18].upper(),
+                "skills": extract_job_skills(f"{title} {description}"),
+            })
+        if not jobs:
+            raise ValueError("Jobs API returned no positions")
+        return jobs, "Live · Arbeitnow"
+    except (requests.RequestException, ValueError, TypeError, KeyError):
+        return FALLBACK_JOB_POSITIONS, "Fallback · role catalog"
+
+
+def job_catalog() -> list[dict]:
+    live_jobs, _ = fetch_live_jobs()
+    return FALLBACK_JOB_POSITIONS + live_jobs
+
+
+def get_job_position(role_title: str) -> dict:
+    return next((job for job in job_catalog() if job["title"] == role_title), FALLBACK_JOB_POSITIONS[0])
+
+
+def get_role_requirements(role_title: str) -> list[str]:
+    return get_job_position(role_title).get("skills") or ["Problem Solving"]
+
 COST_PER_WEEK_INR = 3500  # mock reskilling cost rate used by the Pathway Agent
 
 
@@ -128,7 +291,7 @@ def run_reskilling_pathway_agent(candidate: dict, inferred_skills: dict) -> dict
     identifies gaps, and builds a mock learning path with duration/cost.
     """
     target_role = candidate["target_role"]
-    required = ROLE_REQUIREMENTS[target_role]
+    required = get_role_requirements(target_role)
     have = set(inferred_skills.keys())
 
     matched = [s for s in required if s in have]
@@ -166,7 +329,7 @@ def run_sf_matching_agent(candidate: dict, inferred_skills: dict, pathway_result
     skill coverage weighted by extraction confidence.
     """
     target_role = candidate["target_role"]
-    required = ROLE_REQUIREMENTS[target_role]
+    required = get_role_requirements(target_role)
     matched = pathway_result["matched_skills"]
 
     coverage_pct = (len(matched) / len(required)) * 100 if required else 0
@@ -176,15 +339,18 @@ def run_sf_matching_agent(candidate: dict, inferred_skills: dict, pathway_result
     match_score = round((coverage_pct * 0.7) + (avg_confidence * 100 * 0.3), 1)
     match_score = min(match_score, 99.0)
 
-    req = OPEN_REQUISITIONS[target_role]
+    req = get_job_position(target_role)
 
     return {
         "match_score": match_score,
         "coverage_pct": round(coverage_pct, 1),
         "confidence_avg": round(avg_confidence * 100, 1),
         "req_id": req["req_id"],
-        "team": req["team"],
+        "team": req["company_name"],
         "location": req["location"],
+        "source": req["source"],
+        "job_url": req["url"],
+        "job_description": req["description"],
     }
 
 
@@ -207,14 +373,14 @@ def seed_mock_candidates():
             "name": "Ananya Reddy",
             "github": "github.com/ananya-codes",
             "portfolio": "ananyareddy.dev",
-            "location": TIER_CITIES[0],
+            "location": "Warangal, India",
             "target_role": "SAP Data Analyst",
         },
         {
             "name": "Farhan Sheikh",
             "github": "github.com/farhansheikh21",
             "portfolio": "farhansheikh.vercel.app",
-            "location": TIER_CITIES[2],
+            "location": "Bhubaneswar, India",
             "target_role": "SAP Fiori/UI5 Developer",
         },
     ]
@@ -236,17 +402,22 @@ if "active_candidate_idx" not in st.session_state:
     st.session_state.active_candidate_idx = 0
 
 
+COUNTRY_NAMES, CITIES_BY_COUNTRY, LOCATION_SOURCE = fetch_worldwide_locations()
+LIVE_JOBS, JOBS_SOURCE = fetch_live_jobs()
+JOB_OPTIONS = list(dict.fromkeys([job["title"] for job in FALLBACK_JOB_POSITIONS + LIVE_JOBS]))
+
+
 # ---------------------------------------------------------------------------
 # SIDEBAR NAVIGATION
 # ---------------------------------------------------------------------------
 
-st.sidebar.title("🌉 SkillBridge AI")
-st.sidebar.caption("SAP Hackathon — Theme: Inclusive Workforce")
+st.sidebar.markdown("## 🌉 SkillBridge AI")
+st.sidebar.caption("Inclusive talent intelligence for the global workforce")
 st.sidebar.markdown("---")
 
 page = st.sidebar.radio(
     "Navigate",
-    ["Candidate Upload", "AI Agent Analysis", "HR Approval Dashboard (Human-in-the-Loop)"],
+    ["Candidate Upload", "AI Agent Analysis", "Talent Market Explorer", "HR Approval Dashboard (Human-in-the-Loop)"],
 )
 
 st.sidebar.markdown("---")
@@ -257,7 +428,10 @@ st.sidebar.markdown(
     "3. SAP SuccessFactors Matching Agent\n"
     "4. HR Human-in-the-Loop Approval"
 )
+st.sidebar.markdown("---")
 st.sidebar.caption(f"{len(st.session_state.candidates)} candidate(s) in pipeline")
+st.sidebar.caption(f"🌍 {LOCATION_SOURCE}")
+st.sidebar.caption(f"💼 {JOBS_SOURCE} · {len(LIVE_JOBS)} postings")
 
 
 # ---------------------------------------------------------------------------
@@ -265,11 +439,18 @@ st.sidebar.caption(f"{len(st.session_state.candidates)} candidate(s) in pipeline
 # ---------------------------------------------------------------------------
 
 if page == "Candidate Upload":
-    st.title("📋 Candidate Upload")
-    st.write(
-        "Submit a candidate's public work evidence instead of a traditional resume. "
-        "SkillBridge AI evaluates **demonstrated skill**, not pedigree."
+    st.markdown(
+        '<div class="hero"><div class="eyebrow">Talent intake · evidence over pedigree</div>'
+        '<h1>Build a stronger talent signal.</h1>'
+        '<p>Capture public work evidence, choose any country, and match a candidate to live global roles.</p></div>',
+        unsafe_allow_html=True,
     )
+
+    metrics = st.columns(4)
+    metrics[0].metric("Candidates", len(st.session_state.candidates))
+    metrics[1].metric("Countries available", len(COUNTRY_NAMES))
+    metrics[2].metric("Live positions", len(LIVE_JOBS))
+    metrics[3].metric("HR decisions", len(st.session_state.decision_log))
 
     with st.form("candidate_upload_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
@@ -278,8 +459,12 @@ if page == "Candidate Upload":
             github = st.text_input("GitHub Profile URL", placeholder="github.com/username")
             portfolio = st.text_input("Portfolio / Personal Site URL", placeholder="username.dev")
         with col2:
-            location = st.selectbox("Location", TIER_CITIES)
-            target_role = st.selectbox("Target SAP Role", list(ROLE_REQUIREMENTS.keys()))
+            country = st.selectbox("Country", COUNTRY_NAMES, index=COUNTRY_NAMES.index("India") if "India" in COUNTRY_NAMES else 0)
+            city = st.text_input("City or region", placeholder="e.g., Bengaluru, Ontario, or Remote")
+            target_role = st.selectbox("Target position", JOB_OPTIONS)
+
+        st.caption(f"🌍 Location directory: {LOCATION_SOURCE} · {len(COUNTRY_NAMES)} countries")
+        st.caption(f"💼 Position feed: {JOBS_SOURCE} · live titles are analyzed from their descriptions")
 
         submitted = st.form_submit_button("Submit Candidate ▶")
 
@@ -291,7 +476,7 @@ if page == "Candidate Upload":
                 "name": name,
                 "github": github,
                 "portfolio": portfolio or "Not provided",
-                "location": location,
+                "location": f"{city.strip()}, {country}" if city.strip() else country,
                 "target_role": target_role,
                 "analysis": None,
                 "decision": None,
@@ -303,8 +488,7 @@ if page == "Candidate Upload":
                 "Head to **AI Agent Analysis** to run the pipeline."
             )
 
-    st.markdown("---")
-    st.subheader("Candidates in Pipeline")
+    st.markdown("### Candidates in Pipeline")
     table_rows = [
         {
             "Name": c["name"],
@@ -316,7 +500,7 @@ if page == "Candidate Upload":
         }
         for c in st.session_state.candidates
     ]
-    st.dataframe(pd.DataFrame(table_rows), width='stretch', hide_index=True)
+    st.dataframe(pd.DataFrame(table_rows), width="stretch", hide_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -324,8 +508,12 @@ if page == "Candidate Upload":
 # ---------------------------------------------------------------------------
 
 elif page == "AI Agent Analysis":
-    st.title("🤖 AI Agent Analysis")
-    st.write("Run the three-agent pipeline against a candidate's submitted evidence.")
+    st.markdown(
+        '<div class="hero"><div class="eyebrow">Three-agent decision support</div>'
+        '<h1>Evidence to opportunity.</h1>'
+        '<p>Trace how demonstrated skills become a transparent, reviewable role recommendation.</p></div>',
+        unsafe_allow_html=True,
+    )
 
     if not st.session_state.candidates:
         st.warning("No candidates yet. Go to **Candidate Upload** first.")
@@ -406,12 +594,76 @@ elif page == "AI Agent Analysis":
         col3.metric("Avg. Extraction Confidence", f"{matching['confidence_avg']}%")
 
         st.info(
-            f"**Best-fit open requisition:** `{matching['req_id']}` — {candidate['target_role']}\n\n"
-            f"**Team:** {matching['team']}  |  **Location:** {matching['location']}"
+            f"**Best-fit position:** `{matching['req_id']}` — {candidate['target_role']}\n\n"
+            f"**Company:** {matching['team']}  |  **Location:** {matching['location']}\n\n"
+            f"**Data source:** {matching['source']}"
         )
+        if matching.get("job_url"):
+            st.link_button("Open live job posting", matching["job_url"])
 
     st.markdown("---")
     st.write("➡️ Proceed to **HR Approval Dashboard (Human-in-the-Loop)** to review and decide.")
+
+
+# ---------------------------------------------------------------------------
+# PAGE 3 — TALENT MARKET EXPLORER
+# ---------------------------------------------------------------------------
+
+elif page == "Talent Market Explorer":
+    st.markdown(
+        '<div class="hero"><div class="eyebrow">Global opportunity intelligence</div>'
+        '<h1>Explore the talent market.</h1>'
+        '<p>Browse live positions, inspect skill signals, and bring a role directly into candidate analysis.</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    top_left, top_right = st.columns([3, 1])
+    with top_left:
+        search = st.text_input("Search positions", placeholder="Try data, engineer, analyst, remote...")
+    with top_right:
+        if st.button("↻ Refresh live data"):
+            fetch_live_jobs.clear()
+            fetch_worldwide_locations.clear()
+            st.rerun()
+
+    visible_jobs = LIVE_JOBS
+    if search.strip():
+        query = search.lower().strip()
+        visible_jobs = [
+            job for job in LIVE_JOBS
+            if query in f"{job['title']} {job['company_name']} {job['location']} {job['description']}".lower()
+        ]
+
+    summary = st.columns(3)
+    summary[0].metric("Positions shown", len(visible_jobs))
+    summary[1].metric("Countries in directory", len(COUNTRY_NAMES))
+    summary[2].metric("Feed status", "Live" if JOBS_SOURCE.startswith("Live") else "Fallback")
+
+    if visible_jobs:
+        job_rows = [
+            {
+                "Position": job["title"],
+                "Company": job["company_name"],
+                "Location": job["location"],
+                "Signals": ", ".join(job["skills"][:5]),
+                "Source": job["source"],
+            }
+            for job in visible_jobs
+        ]
+        st.dataframe(pd.DataFrame(job_rows), width="stretch", hide_index=True)
+
+        selected_job = st.selectbox("Inspect a position", range(len(visible_jobs)), format_func=lambda i: visible_jobs[i]["title"])
+        job = visible_jobs[selected_job]
+        with st.container(border=True):
+            st.subheader(job["title"])
+            st.caption(f"{job['company_name']} · {job['location']} · {job['source']}")
+            st.write(f"**Skill signals:** {', '.join(job['skills'])}")
+            if job["description"]:
+                st.write(job["description"][:1200] + ("..." if len(job["description"]) > 1200 else ""))
+            if job["url"]:
+                st.link_button("View original posting", job["url"])
+    else:
+        st.info("No positions match this search. Try a broader keyword or refresh the live feed.")
 
 
 # ---------------------------------------------------------------------------
@@ -419,10 +671,11 @@ elif page == "AI Agent Analysis":
 # ---------------------------------------------------------------------------
 
 elif page == "HR Approval Dashboard (Human-in-the-Loop)":
-    st.title("✅ HR Approval Dashboard")
-    st.write(
-        "Human-in-the-Loop checkpoint: an HR Manager reviews the AI's recommendation "
-        "before any candidate is moved forward — the AI advises, a human decides."
+    st.markdown(
+        '<div class="hero"><div class="eyebrow">Human-in-the-loop governance</div>'
+        '<h1>Make the final call with context.</h1>'
+        '<p>Review evidence, investment, and model confidence before a candidate moves forward.</p></div>',
+        unsafe_allow_html=True,
     )
 
     analyzed_candidates = [c for c in st.session_state.candidates if c["analysis"]]

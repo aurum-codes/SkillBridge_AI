@@ -22,11 +22,16 @@ approving a candidate for interview or rejecting the recommendation.
 
 ## Features
 
-- Candidate intake for name, GitHub profile, portfolio, location, and target role
+- Candidate intake for name, GitHub profile, portfolio, worldwide country/city,
+   and target position
+- Worldwide country directory powered by CountriesNow, with offline fallback
+- Live job positions from Arbeitnow, with role-specific skill extraction and
+   offline fallback roles
 - Five simulated SAP roles: ABAP Developer, Fiori/UI5 Developer, Business Analyst,
-  Basis Administrator, and Data Analyst
+   Basis Administrator, and Data Analyst
 - Skill confidence scores, role-specific gap analysis, and learning paths
 - Simulated SuccessFactors Talent Intelligence Hub requisition matching
+- Talent Market Explorer with search, job descriptions, skill signals, and source links
 - HR decision notes and an in-session decision log
 - Two seeded candidates with completed analysis for an immediate demo
 
@@ -35,6 +40,12 @@ approving a candidate for interview or rejecting the recommendation.
 - Python 3.10+
 - [Streamlit](https://streamlit.io/) for the interactive dashboard
 - [pandas](https://pandas.pydata.org/) for tabular results
+- [Requests](https://requests.readthedocs.io/) for resilient API access
+
+The app uses these public APIs when online:
+
+- CountriesNow: `https://countriesnow.space/api/v0.1/countries`
+- Arbeitnow Job Board API: `https://www.arbeitnow.com/api/job-board-api`
 
 ## Run Locally
 
@@ -81,7 +92,9 @@ SkillBridge_AI/
 
 ## Prototype Scope
 
-The agent logic and SAP SuccessFactors integration are simulated locally for
-the hackathon demo. No external GitHub scanning, SAP connection, LLM API, or
-candidate data storage is configured. Candidate data and HR decisions live in
-Streamlit session state and reset when the app restarts.
+The candidate inference and SAP SuccessFactors integration are simulated locally
+for the hackathon demo. Public country and job feeds are fetched with timeouts,
+cached in Streamlit, and replaced by local fallback catalogs when unavailable.
+No external GitHub scanning, SAP connection, LLM API, or candidate data storage
+is configured. Candidate data and HR decisions live in Streamlit session state
+and reset when the app restarts.
